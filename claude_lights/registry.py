@@ -126,6 +126,8 @@ class Registry:
 
     Claude Code rewrites these files in place, so a poll can land mid-write. The
     cache stops a dot flickering out for a full poll interval when that happens.
+    It only ever covers an unreadable file whose process is still alive, so a
+    file left permanently truncated cannot pin a dot for a dead session.
     """
 
     def __init__(self, session_dir: Path = DEFAULT_SESSION_DIR) -> None:
@@ -136,7 +138,14 @@ class Registry:
         result = scan(self._dir)
         by_pid = {s.pid: s for s in result.sessions}
         for pid in result.unreadable_pids:
-            if pid not in by_pid and pid in self._last_good:
+            if pid in by_pid or pid not in self._last_good:
+                continue
+            # Liveness is re-checked here, not inherited from the cache. A file
+            # left truncated by a SIGKILL mid-rewrite stays unreadable forever,
+            # and without this the cached entry re-seeds itself every poll: a
+            # permanently green dot for a session that no longer exists, which
+            # is the exact opposite of what green means.
+            if _proc_start_ticks(pid) is not None:
                 by_pid[pid] = self._last_good[pid]
         self._last_good = dict(by_pid)
         return sorted(by_pid.values(), key=lambda s: (s.started_at, s.pid))

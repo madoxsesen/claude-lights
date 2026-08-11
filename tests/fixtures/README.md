@@ -44,7 +44,7 @@ start = raw[raw.rfind(")") + 2:].split()[19]
 
 d = pathlib.Path("/tmp/claude-lights-manual-fixture")
 d.mkdir(parents=True, exist_ok=True)
-(d / f"{pid}0.json").write_text(json.dumps({
+(d / f"{pid}.json").write_text(json.dumps({
     "pid": pid, "cwd": "/home/msesen/git/atira", "startedAt": 1000,
     "procStart": start, "name": "atira-d0", "status": "idle", "tmux": None,
 }))

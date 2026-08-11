@@ -17,9 +17,9 @@ def _run_widget(session_dir: Path | None = None, demo: bool = False) -> int:
 
 
 def _install() -> int:
-    from claude_lights import shortcut
+    from claude_lights import kwin
 
-    return shortcut.install()
+    return kwin.install()
 
 
 def main(argv: list[str] | None = None) -> int:

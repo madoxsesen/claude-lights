@@ -47,3 +47,15 @@ def test_demo_flag_passes_demo_through(monkeypatch):
     monkeypatch.setattr(cli, "_run_widget", fake_run)
     assert cli.main(["--demo"]) == 0
     assert seen["demo"] is True
+
+
+def test_install_dispatches_to_the_installer(monkeypatch):
+    calls = []
+
+    def fake_install():
+        calls.append("install")
+        return 0
+
+    monkeypatch.setattr(cli, "_install", fake_install)
+    assert cli.main(["install"]) == 0
+    assert calls == ["install"]

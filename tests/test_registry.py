@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -172,3 +173,27 @@ def test_starttime_parser_reads_field_22_of_a_synthetic_stat_line():
     filler_fields = [str(n) for n in range(1, 19)]  # fields 4..21
     line = "1234 (my (weird) proc) S " + " ".join(filler_fields) + " 424242 extra1 extra2"
     assert registry._parse_starttime(line) == "424242"
+
+
+def test_registry_stops_resurrecting_a_cached_session_once_its_process_exits(tmp_path):
+    """The last-known-good cache covers a poll that lands mid-rewrite, nothing
+    more. A file left permanently truncated by a SIGKILL must not pin its dot
+    forever: a stale green dot reads as "free to hand it work" for a session
+    that no longer exists."""
+    proc = subprocess.Popen(["sleep", "30"])
+    try:
+        path = write_session(tmp_path, proc.pid, status="busy")
+        reg = Registry(tmp_path)
+        assert [s.status for s in reg.poll()] == ["busy"]
+
+        path.write_text('{"pid": %d, "status": "bu' % proc.pid)
+        assert [s.status for s in reg.poll()] == ["busy"], "cached while still alive"
+
+        proc.kill()
+        proc.wait()
+        for _ in range(3):
+            assert reg.poll() == [], "a dead session must not be resurrected"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

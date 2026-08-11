@@ -1,4 +1,5 @@
 import os
+import pathlib
 import signal
 import time
 
@@ -14,7 +15,7 @@ def test_pidfile_path_uses_xdg_runtime_dir(monkeypatch, tmp_path):
 
 def test_pidfile_path_falls_back_when_unset(monkeypatch):
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert pidfile_path() == __import__("pathlib").Path(f"/run/user/{os.getuid()}/claude-lights.pid")
+    assert pidfile_path() == pathlib.Path(f"/run/user/{os.getuid()}/claude-lights.pid")
 
 
 def test_write_then_read_roundtrip(tmp_path):

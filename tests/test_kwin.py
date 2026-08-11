@@ -1,7 +1,7 @@
 import configparser
 from pathlib import Path
 
-from claude_lights import shortcut
+from claude_lights import kwin
 
 
 def _read(path: Path) -> configparser.ConfigParser:
@@ -13,16 +13,16 @@ def _read(path: Path) -> configparser.ConfigParser:
 
 def _stub_qdbus(monkeypatch, present: bool = True) -> None:
     monkeypatch.setattr(
-        shortcut.shutil, "which", lambda name: "/usr/bin/qdbus6" if present and name == "qdbus6" else None
+        kwin.shutil, "which", lambda name: "/usr/bin/qdbus6" if present and name == "qdbus6" else None
     )
-    monkeypatch.setattr(shortcut.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(kwin.subprocess, "run", lambda *a, **k: None)
 
 
 def test_write_kwin_rule_creates_a_fresh_file_when_none_exists(tmp_path, monkeypatch):
     path = tmp_path / "kwinrulesrc"
     _stub_qdbus(monkeypatch)
 
-    ok, _msg = shortcut.write_kwin_rule(path)
+    ok, _msg = kwin.write_kwin_rule(path)
 
     assert ok is True
     parser = _read(path)
@@ -39,7 +39,7 @@ def test_write_kwin_rule_handles_an_empty_file(tmp_path, monkeypatch):
     path.write_text("")
     _stub_qdbus(monkeypatch)
 
-    ok, _msg = shortcut.write_kwin_rule(path)
+    ok, _msg = kwin.write_kwin_rule(path)
 
     assert ok is True
     parser = _read(path)
@@ -64,7 +64,7 @@ def test_write_kwin_rule_preserves_two_unrelated_existing_rules(tmp_path, monkey
     )
     _stub_qdbus(monkeypatch)
 
-    ok, _msg = shortcut.write_kwin_rule(path)
+    ok, _msg = kwin.write_kwin_rule(path)
 
     assert ok is True
     parser = _read(path)
@@ -93,7 +93,7 @@ def test_write_kwin_rule_preserves_unrelated_sections_and_general_keys(tmp_path,
     )
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     parser = _read(path)
     assert parser["$Version"]["update_info"] == "kwinrules.upd:replace-placement-string-to-enum"
@@ -105,8 +105,8 @@ def test_write_kwin_rule_is_idempotent(tmp_path, monkeypatch):
     path = tmp_path / "kwinrulesrc"
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     parser = _read(path)
     assert parser["General"]["count"] == "1"
@@ -129,7 +129,7 @@ def test_write_kwin_rule_updates_in_place_alongside_other_rules(tmp_path, monkey
     )
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     parser = _read(path)
     assert parser["General"]["count"] == "2", "must not grow a duplicate rule on reinstall"
@@ -143,7 +143,7 @@ def test_write_kwin_rule_heals_a_general_missing_from_rules_list(tmp_path, monke
     path.write_text("[General]\ncount=1\nrules=\n\n[1]\nwmclass=firefox\n")
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     parser = _read(path)
     assert parser["General"]["rules"] == "1,2"
@@ -154,7 +154,7 @@ def test_write_kwin_rule_reports_failure_but_still_writes_when_qdbus6_is_missing
     path = tmp_path / "kwinrulesrc"
     _stub_qdbus(monkeypatch, present=False)
 
-    ok, msg = shortcut.write_kwin_rule(path)
+    ok, msg = kwin.write_kwin_rule(path)
 
     assert ok is False
     assert "qdbus6" in msg
@@ -170,7 +170,7 @@ def test_write_kwin_rule_refuses_to_touch_an_unparseable_file(tmp_path, monkeypa
     path.write_text(garbage)
     _stub_qdbus(monkeypatch)
 
-    ok, msg = shortcut.write_kwin_rule(path)
+    ok, msg = kwin.write_kwin_rule(path)
 
     assert ok is False
     assert "could not be parsed" in msg
@@ -185,7 +185,7 @@ def test_merge_kwin_rule_avoids_colliding_with_a_dangling_rules_reference():
     parser.optionxform = str
     parser.read_string("[General]\ncount=5\nrules=1,2,3,4,5\n\n[1]\nwmclass=firefox\n")
 
-    shortcut.merge_kwin_rule(parser)
+    kwin.merge_kwin_rule(parser)
 
     rules = parser["General"]["rules"].split(",")
     assert len(rules) == len(set(rules)), f"rules list has a duplicate id: {rules}"
@@ -194,8 +194,8 @@ def test_merge_kwin_rule_avoids_colliding_with_a_dangling_rules_reference():
 
 
 def test_write_kwin_rule_does_not_overwrite_an_existing_backup_on_a_second_run(tmp_path, monkeypatch):
-    # Regression: install is meant to be re-runnable (e.g. to change the
-    # shortcut key). A naive "always back up the current file" would, on the
+    # Regression: install is meant to be re-runnable (to re-apply the rule
+    # after KDE rewrites kwinrulesrc, say). A naive "always back up" would, on the
     # second run, back up the first run's already-merged output, destroying
     # the one copy of the user's true pre-install content.
     path = tmp_path / "kwinrulesrc"
@@ -203,8 +203,8 @@ def test_write_kwin_rule_does_not_overwrite_an_existing_backup_on_a_second_run(t
     path.write_text(original)
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     backup = path.with_name(path.name + ".bak")
     assert backup.read_text() == original, "the backup must still be the ORIGINAL pre-install content"
@@ -214,7 +214,7 @@ def test_write_kwin_rule_leaves_no_temp_file_behind(tmp_path, monkeypatch):
     path = tmp_path / "kwinrulesrc"
     _stub_qdbus(monkeypatch)
 
-    shortcut.write_kwin_rule(path)
+    kwin.write_kwin_rule(path)
 
     assert not path.with_name(f"{path.name}.tmp").exists()
     assert path.exists()
@@ -223,28 +223,28 @@ def test_write_kwin_rule_leaves_no_temp_file_behind(tmp_path, monkeypatch):
 def _stub_launcher(monkeypatch, tmp_path):
     launcher = tmp_path / "claude-lights"
     launcher.write_text("#!/usr/bin/env bash\n")
-    monkeypatch.setattr(shortcut, "_launcher_path", lambda: launcher)
+    monkeypatch.setattr(kwin, "_launcher_path", lambda: launcher)
     return launcher
 
 
 def test_install_returns_zero_when_the_kwin_rule_applies(monkeypatch, tmp_path, capsys):
     _stub_launcher(monkeypatch, tmp_path)
-    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
+    monkeypatch.setattr(kwin, "write_kwin_rule", lambda: (True, "merged fine"))
 
-    assert shortcut.install() == 0
+    assert kwin.install() == 0
     assert "KWin rule: ok" in capsys.readouterr().out
 
 
 def test_install_returns_one_when_the_launcher_is_missing(monkeypatch, tmp_path):
-    monkeypatch.setattr(shortcut, "_launcher_path", lambda: tmp_path / "missing-launcher")
-    assert shortcut.install() == 1
+    monkeypatch.setattr(kwin, "_launcher_path", lambda: tmp_path / "missing-launcher")
+    assert kwin.install() == 1
 
 
 def test_install_returns_one_and_says_so_when_the_kwin_rule_fails(monkeypatch, tmp_path, capsys):
     _stub_launcher(monkeypatch, tmp_path)
-    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (False, "no qdbus6"))
+    monkeypatch.setattr(kwin, "write_kwin_rule", lambda: (False, "no qdbus6"))
 
-    assert shortcut.install() == 1
+    assert kwin.install() == 1
     out = capsys.readouterr().out
     assert "KWin rule: FAILED" in out
     assert "did not apply" in out
@@ -252,9 +252,9 @@ def test_install_returns_one_and_says_so_when_the_kwin_rule_fails(monkeypatch, t
 
 def test_install_always_prints_the_hotkey_instructions(monkeypatch, tmp_path, capsys):
     launcher = _stub_launcher(monkeypatch, tmp_path)
-    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
+    monkeypatch.setattr(kwin, "write_kwin_rule", lambda: (True, "merged fine"))
 
-    shortcut.install()
+    kwin.install()
     out = capsys.readouterr().out
     assert "System Settings > Keyboard > Shortcuts > Add > Command" in out
     assert f"{launcher} toggle" in out
@@ -265,12 +265,21 @@ def test_install_writes_no_kde_shortcut_config(monkeypatch, tmp_path):
     component it registered itself. Writing it anyway would leave dead entries in
     the user's KDE config, so nothing must shell out to kwriteconfig6."""
     _stub_launcher(monkeypatch, tmp_path)
-    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
+    monkeypatch.setattr(kwin, "write_kwin_rule", lambda: (True, "merged fine"))
     calls = []
-    monkeypatch.setattr(shortcut.subprocess, "run", lambda args, **kwargs: calls.append(args))
+    monkeypatch.setattr(kwin.subprocess, "run", lambda args, **kwargs: calls.append(args))
 
-    shortcut.install()
+    kwin.install()
 
     assert calls == []
-    assert not hasattr(shortcut, "write_global_shortcut")
-    assert not hasattr(shortcut, "write_desktop_file")
+    assert not hasattr(kwin, "write_global_shortcut")
+    assert not hasattr(kwin, "write_desktop_file")
+
+
+def test_the_rule_matches_the_app_id_the_widget_sets():
+    """The rule matches on wmclass, and the rule is the only thing giving the
+    widget its position, keep-above and focus suppression. If these two strings
+    drift apart nothing errors: the widget just comes back unplaced."""
+    from claude_lights import APP_ID
+
+    assert kwin._RULE_KEYS["wmclass"] == APP_ID

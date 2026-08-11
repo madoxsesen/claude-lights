@@ -15,18 +15,15 @@ gi.require_version("Gtk", "3.0")
 
 from gi.repository import GLib, Gtk  # noqa: E402
 
-# The Wayland app_id the KWin rule matches on. Must be set before any window is
-# realized, which is why LightsWindow.__init__ calls _ensure_app_id() first.
-_APP_ID = "claude-lights"
-
-
 def _ensure_app_id() -> None:
-    if GLib.get_prgname() != _APP_ID:
-        GLib.set_prgname(_APP_ID)
-        GLib.set_application_name(_APP_ID)
+    """Set the Wayland app_id the KWin rule matches on. Must run before any
+    window is realized, which is why LightsWindow.__init__ calls it first."""
+    if GLib.get_prgname() != APP_ID:
+        GLib.set_prgname(APP_ID)
+        GLib.set_application_name(APP_ID)
 
 
-from claude_lights import ipc  # noqa: E402
+from claude_lights import APP_ID, ipc  # noqa: E402
 from claude_lights.grid import layout  # noqa: E402
 from claude_lights.registry import DEFAULT_SESSION_DIR, Registry, Session  # noqa: E402
 from claude_lights.state import Light, blinks, light_for, rgb  # noqa: E402
@@ -106,7 +103,7 @@ class LightsWindow(Gtk.Window):
 
         # KWin accepts layer-shell surfaces but never composites them, so this
         # is an ordinary window. Placement, keep-above and taskbar suppression
-        # come from the KWin rule that matches _APP_ID.
+        # come from the KWin rule that matches APP_ID.
         self.set_decorated(False)
         self.set_resizable(False)
         self.set_keep_above(True)  # honoured under X11; on Wayland the rule enforces it

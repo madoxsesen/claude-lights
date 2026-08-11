@@ -31,9 +31,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-KWIN_RULES_PATH = Path.home() / ".config" / "kwinrulesrc"
+from claude_lights import APP_ID
 
-APP_ID = "claude-lights"
+KWIN_RULES_PATH = Path.home() / ".config" / "kwinrulesrc"
 
 # Verified working on 2026-08-11: forces position, keep-above, no border, and
 # skip-{taskbar,pager,switcher}. acceptfocus=false and fsplevel=4 are what
@@ -141,10 +141,11 @@ def write_kwin_rule(path: Path = KWIN_RULES_PATH) -> tuple[bool, str]:
     it, which is worse than leaving the install half-done and saying so."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Backed up once, ever, per file: install is meant to be re-run (e.g. to
-    # change the shortcut key), and a second run's "before" is the first
-    # run's "after". Re-backing up on every call would overwrite the one
-    # copy of the user's true pre-install content with our own prior merge.
+    # Backed up once, ever, per file: install is meant to be re-runnable (to
+    # re-apply the rule after KDE rewrites kwinrulesrc, say), and a second
+    # run's "before" is the first run's "after". Re-backing up on every call
+    # would overwrite the one copy of the user's true pre-install content
+    # with our own prior merge.
     backup = path.with_name(f"{path.name}.bak")
     if path.exists() and not backup.exists():
         shutil.copy2(path, backup)
