@@ -125,11 +125,13 @@ class LightsWindow(Gtk.Window):
         return GLib.SOURCE_CONTINUE
 
     def _on_blink(self) -> bool:
+        # No `return` inside this try: an early return would skip the
+        # sibling `else` below and leave _logged_blink_error stuck once set,
+        # since "nothing is waiting" is the common case.
         try:
-            if not any(blinks(_light_for_session(s)) for s in self._sessions):
-                return GLib.SOURCE_CONTINUE
-            self._blink_on = not self._blink_on
-            self._area.queue_draw()
+            if any(blinks(_light_for_session(s)) for s in self._sessions):
+                self._blink_on = not self._blink_on
+                self._area.queue_draw()
         except Exception:
             if not self._logged_blink_error:
                 log.exception("blink tick failed")
@@ -155,13 +157,18 @@ class LightsWindow(Gtk.Window):
         # but it does print a traceback and can leave the frame half-painted.
         # A draw crash is exactly the "invisible and no clue why" failure mode
         # this file exists to prevent, so it gets the same guard as the timers.
+        # No `return` inside the try: that would skip the sibling `else` and
+        # leave _logged_draw_error stuck true after the first failure.
         try:
-            return self._draw(ctx)
+            result = self._draw(ctx)
         except Exception:
             if not self._logged_draw_error:
                 log.exception("draw failed")
                 self._logged_draw_error = True
             return False
+        else:
+            self._logged_draw_error = False
+            return result
 
     def _draw(self, ctx) -> bool:
         cols, _rows = layout(len(self._sessions))
