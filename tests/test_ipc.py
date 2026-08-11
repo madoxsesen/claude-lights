@@ -2,6 +2,8 @@ import os
 import signal
 import time
 
+import pytest
+
 from claude_lights.ipc import pidfile_path, read_pidfile, send_toggle, write_pidfile
 
 
@@ -54,3 +56,27 @@ def test_send_toggle_removes_a_stale_pidfile(tmp_path):
 
 def test_send_toggle_with_no_pidfile_is_false(tmp_path):
     assert send_toggle(tmp_path / "absent.pid") is False
+
+
+@pytest.mark.parametrize("garbage", ["0", "-1", "-12345"])
+def test_read_pidfile_rejects_non_positive_pids(tmp_path, garbage):
+    # os.kill(0, ...) signals the whole process group; -1 signals everything
+    # the user may signal. Neither may ever reach os.kill.
+    path = tmp_path / "claude-lights.pid"
+    path.write_text(garbage)
+    assert read_pidfile(path) is None
+
+
+@pytest.mark.parametrize("garbage", ["0", "-1"])
+def test_send_toggle_refuses_non_positive_pids(tmp_path, garbage):
+    path = tmp_path / "claude-lights.pid"
+    path.write_text(garbage)
+    assert send_toggle(path) is False
+
+
+def test_send_toggle_keeps_pidfile_on_permission_error(tmp_path, monkeypatch):
+    path = tmp_path / "claude-lights.pid"
+    write_pidfile(path)
+    monkeypatch.setattr("os.kill", lambda *_: (_ for _ in ()).throw(PermissionError("test")))
+    assert send_toggle(path) is False
+    assert path.exists(), "pidfile must be kept when process exists but is not signalable"
