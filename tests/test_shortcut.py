@@ -162,55 +162,77 @@ def test_write_kwin_rule_reports_failure_but_still_writes_when_qdbus6_is_missing
     assert parser["1"]["wmclass"] == "claude-lights"
 
 
-def test_write_desktop_file_points_at_the_launcher_and_toggle(tmp_path):
-    launcher = tmp_path / "claude-lights"
-    apps_dir = tmp_path / "applications"
+def test_write_kwin_rule_refuses_to_touch_an_unparseable_file(tmp_path, monkeypatch):
+    # Regression for a bug where an unparseable file was silently treated as
+    # empty, discarding whatever the user actually had in it.
+    path = tmp_path / "kwinrulesrc"
+    garbage = "this is not valid ini at all\nno section header\njust garbage=1\n"
+    path.write_text(garbage)
+    _stub_qdbus(monkeypatch)
 
-    desktop_file = shortcut.write_desktop_file(launcher, directory=apps_dir)
-
-    content = desktop_file.read_text()
-    assert f"Exec={launcher} toggle" in content
-    assert "X-KDE-GlobalAccel-CommandShortcut=true" in content
-    assert desktop_file.name == shortcut.DESKTOP_ID
-
-
-def test_write_global_shortcut_writes_both_keys_via_kwriteconfig6(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        shortcut.shutil, "which", lambda name: "/usr/bin/kwriteconfig6" if name == "kwriteconfig6" else None
-    )
-    monkeypatch.setattr(shortcut.subprocess, "run", lambda args, **kwargs: calls.append(args))
-
-    ok, _msg = shortcut.write_global_shortcut("Meta+C")
-
-    assert ok is True
-    assert len(calls) == 2
-    assert calls[0][-1] == shortcut.FRIENDLY_NAME
-    assert calls[1][-1] == "Meta+C,none,Toggle Claude Lights"
-    assert all(a[:2] == ["/usr/bin/kwriteconfig6", "--file"] for a in calls)
-
-
-def test_write_global_shortcut_reports_failure_when_kwriteconfig_is_missing(monkeypatch):
-    monkeypatch.setattr(shortcut.shutil, "which", lambda name: None)
-
-    ok, msg = shortcut.write_global_shortcut("Meta+C")
+    ok, msg = shortcut.write_kwin_rule(path)
 
     assert ok is False
-    assert "kwriteconfig6" in msg
+    assert "could not be parsed" in msg
+    assert path.read_text() == garbage, "an unparseable file must be left byte-for-byte untouched"
 
 
-def test_install_returns_zero_when_both_halves_apply(monkeypatch, tmp_path, capsys):
+def test_merge_kwin_rule_avoids_colliding_with_a_dangling_rules_reference():
+    # Regression: rules= can list more ids than have a physical [N] section
+    # (stale reference left behind by hand-editing, or a drifted [General]).
+    # The next id must dodge those too, not just the sections that exist.
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    parser.read_string("[General]\ncount=5\nrules=1,2,3,4,5\n\n[1]\nwmclass=firefox\n")
+
+    shortcut.merge_kwin_rule(parser)
+
+    rules = parser["General"]["rules"].split(",")
+    assert len(rules) == len(set(rules)), f"rules list has a duplicate id: {rules}"
+    assert parser["General"]["count"] == "6"
+    assert parser["6"]["wmclass"] == "claude-lights"
+
+
+def test_write_kwin_rule_does_not_overwrite_an_existing_backup_on_a_second_run(tmp_path, monkeypatch):
+    # Regression: install is meant to be re-runnable (e.g. to change the
+    # shortcut key). A naive "always back up the current file" would, on the
+    # second run, back up the first run's already-merged output, destroying
+    # the one copy of the user's true pre-install content.
+    path = tmp_path / "kwinrulesrc"
+    original = "[General]\ncount=1\nrules=1\n\n[1]\nwmclass=firefox\n"
+    path.write_text(original)
+    _stub_qdbus(monkeypatch)
+
+    shortcut.write_kwin_rule(path)
+    shortcut.write_kwin_rule(path)
+
+    backup = path.with_name(path.name + ".bak")
+    assert backup.read_text() == original, "the backup must still be the ORIGINAL pre-install content"
+
+
+def test_write_kwin_rule_leaves_no_temp_file_behind(tmp_path, monkeypatch):
+    path = tmp_path / "kwinrulesrc"
+    _stub_qdbus(monkeypatch)
+
+    shortcut.write_kwin_rule(path)
+
+    assert not path.with_name(f"{path.name}.tmp").exists()
+    assert path.exists()
+
+
+def _stub_launcher(monkeypatch, tmp_path):
     launcher = tmp_path / "claude-lights"
     launcher.write_text("#!/usr/bin/env bash\n")
     monkeypatch.setattr(shortcut, "_launcher_path", lambda: launcher)
+    return launcher
+
+
+def test_install_returns_zero_when_the_kwin_rule_applies(monkeypatch, tmp_path, capsys):
+    _stub_launcher(monkeypatch, tmp_path)
     monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
-    monkeypatch.setattr(shortcut, "write_desktop_file", lambda launcher: tmp_path / "x.desktop")
-    monkeypatch.setattr(shortcut, "write_global_shortcut", lambda keys: (True, "registered fine"))
 
     assert shortcut.install() == 0
-    out = capsys.readouterr().out
-    assert "KWin rule: ok" in out
-    assert "Global shortcut: ok" in out
+    assert "KWin rule: ok" in capsys.readouterr().out
 
 
 def test_install_returns_one_when_the_launcher_is_missing(monkeypatch, tmp_path):
@@ -218,41 +240,37 @@ def test_install_returns_one_when_the_launcher_is_missing(monkeypatch, tmp_path)
     assert shortcut.install() == 1
 
 
-def test_install_returns_one_and_says_so_when_the_kwin_half_fails(monkeypatch, tmp_path, capsys):
-    launcher = tmp_path / "claude-lights"
-    launcher.write_text("#!/usr/bin/env bash\n")
-    monkeypatch.setattr(shortcut, "_launcher_path", lambda: launcher)
+def test_install_returns_one_and_says_so_when_the_kwin_rule_fails(monkeypatch, tmp_path, capsys):
+    _stub_launcher(monkeypatch, tmp_path)
     monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (False, "no qdbus6"))
-    monkeypatch.setattr(shortcut, "write_desktop_file", lambda launcher: tmp_path / "x.desktop")
-    monkeypatch.setattr(shortcut, "write_global_shortcut", lambda keys: (True, "registered fine"))
 
     assert shortcut.install() == 1
     out = capsys.readouterr().out
     assert "KWin rule: FAILED" in out
-    assert "did not fully apply" in out
+    assert "did not apply" in out
 
 
-def test_install_returns_one_and_says_so_when_the_shortcut_half_fails(monkeypatch, tmp_path, capsys):
-    launcher = tmp_path / "claude-lights"
-    launcher.write_text("#!/usr/bin/env bash\n")
-    monkeypatch.setattr(shortcut, "_launcher_path", lambda: launcher)
+def test_install_always_prints_the_hotkey_instructions(monkeypatch, tmp_path, capsys):
+    launcher = _stub_launcher(monkeypatch, tmp_path)
     monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
-    monkeypatch.setattr(shortcut, "write_desktop_file", lambda launcher: tmp_path / "x.desktop")
-    monkeypatch.setattr(shortcut, "write_global_shortcut", lambda keys: (False, "kwriteconfig6 not found"))
-
-    assert shortcut.install() == 1
-    out = capsys.readouterr().out
-    assert "Global shortcut: FAILED" in out
-
-
-def test_install_always_prints_the_manual_fallback(monkeypatch, tmp_path, capsys):
-    launcher = tmp_path / "claude-lights"
-    launcher.write_text("#!/usr/bin/env bash\n")
-    monkeypatch.setattr(shortcut, "_launcher_path", lambda: launcher)
-    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
-    monkeypatch.setattr(shortcut, "write_desktop_file", lambda launcher: tmp_path / "x.desktop")
-    monkeypatch.setattr(shortcut, "write_global_shortcut", lambda keys: (True, "registered fine"))
 
     shortcut.install()
     out = capsys.readouterr().out
     assert "System Settings > Keyboard > Shortcuts > Add > Command" in out
+    assert f"{launcher} toggle" in out
+
+
+def test_install_writes_no_kde_shortcut_config(monkeypatch, tmp_path):
+    """The hotkey cannot be bound by writing config: kglobalaccel only honours a
+    component it registered itself. Writing it anyway would leave dead entries in
+    the user's KDE config, so nothing must shell out to kwriteconfig6."""
+    _stub_launcher(monkeypatch, tmp_path)
+    monkeypatch.setattr(shortcut, "write_kwin_rule", lambda: (True, "merged fine"))
+    calls = []
+    monkeypatch.setattr(shortcut.subprocess, "run", lambda args, **kwargs: calls.append(args))
+
+    shortcut.install()
+
+    assert calls == []
+    assert not hasattr(shortcut, "write_global_shortcut")
+    assert not hasattr(shortcut, "write_desktop_file")

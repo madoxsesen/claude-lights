@@ -1,34 +1,38 @@
-"""Install the KWin window rule and the KDE global shortcut.
+"""Install the KWin window rule, and explain the hotkey KDE will not let us bind.
 
-Wayland forbids an application from grabbing its own global hotkey, and KWin
-accepts layer-shell surfaces but never composites them (see widget.py), so
-both halves of "make the widget behave" live outside the app entirely, in
-KDE's own config files:
+KWin accepts layer-shell surfaces but never composites them (see widget.py), so
+the widget is an ordinary window and everything about how it behaves comes from
+a KWin rule matched on the Wayland app_id it sets (``claude-lights``): position,
+keep-above, no border, no focus, and hidden from taskbar/pager/switcher. Without
+the rule it is an unplaced, focus-stealing, taskbar-visible window. That half is
+fully automatic here, and kwinrulesrc is merged rather than overwritten because
+it may already hold the user's own rules.
 
-1. A KWin window rule, matched on the Wayland app_id the widget sets
-   (``claude-lights``), forces the window's position, keep-above, border and
-   taskbar/pager/switcher visibility. Without it the widget is an unplaced,
-   focus-stealing, taskbar-visible ordinary window.
-2. A KDE global shortcut (Plasma 6 dropped khotkeys) bound to a .desktop
-   file that runs ``claude-lights toggle``.
+The global hotkey is NOT automatable, verified on 2026-08-11:
 
-kwinrulesrc may already hold the user's own rules, so it is merged, never
-overwritten. kglobalshortcutsrc is written through kwriteconfig6, the only
-sanctioned writer, because Plasma owns that file and overwrites hand edits.
+* Writing a ``[services][<id>.desktop]`` entry plus a matching .desktop file,
+  then running ``kbuildsycoca6 --noincremental`` and restarting
+  plasma-kglobalaccel, never produces a registered component.
+* Binding the same command by hand in System Settings does work, and makes KDE
+  write its own .desktop and shortcut entry, after which the component appears
+  in ``org.kde.KGlobalAccel.allComponents``.
+* Calling ``org.kde.KGlobalAccel.setShortcut`` over D-Bus is accepted, returns
+  an empty list, and registers nothing: the component must register itself.
+
+So writing shortcut config would only leave dead entries in the user's KDE
+configuration. This module prints instructions instead of pretending.
 """
 
 from __future__ import annotations
 
 import configparser
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 KWIN_RULES_PATH = Path.home() / ".config" / "kwinrulesrc"
-APPLICATIONS_DIR = Path.home() / ".local" / "share" / "applications"
 
-DESKTOP_ID = "claude-lights-toggle.desktop"
-FRIENDLY_NAME = "Toggle Claude Lights"
 APP_ID = "claude-lights"
 
 # Verified working on 2026-08-11: forces position, keep-above, no border, and
@@ -58,33 +62,30 @@ _RULE_KEYS: dict[str, str] = {
     "wmclassmatch": "1",
 }
 
-_DESKTOP_TEMPLATE = """[Desktop Entry]
-Type=Application
-Name={name}
-Exec={exec_path} toggle
-NoDisplay=true
-Terminal=false
-X-KDE-GlobalAccel-CommandShortcut=true
-"""
-
-
 def _launcher_path() -> Path:
     return Path(__file__).resolve().parent.parent / "bin" / "claude-lights"
 
 
 def _read_config(path: Path) -> configparser.ConfigParser:
+    """Raises configparser.Error on a file that isn't valid INI. Callers must
+    not swallow that: a kwinrulesrc we can't parse must never be treated as
+    an empty one, or we'd overwrite whatever the user actually had in it."""
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     # KDE config keys are case-sensitive ("Description" vs "wmclass"); the
     # default optionxform would lowercase every key on write.
     parser.optionxform = str  # type: ignore[method-assign]
     if path.exists():
-        try:
-            parser.read(path, encoding="utf-8")
-        except configparser.Error:
-            # A file we can't parse must not block install. Start fresh on
-            # top of the backup write_kwin_rule() already took.
-            pass
+        parser.read(path, encoding="utf-8")
     return parser
+
+
+def _atomic_write(path: Path, parser: configparser.ConfigParser) -> None:
+    # Write to a temp file in the same directory and rename over the target,
+    # so a crash mid-write cannot leave the user's live KDE config truncated.
+    tmp = path.with_name(f"{path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        parser.write(fh, space_around_delimiters=False)
+    os.replace(tmp, path)
 
 
 def merge_kwin_rule(parser: configparser.ConfigParser) -> str:
@@ -107,7 +108,12 @@ def merge_kwin_rule(parser: configparser.ConfigParser) -> str:
         None,
     )
     if our_section is None:
-        next_id = max((int(s) for s in numeric_sections), default=0) + 1
+        # rules= can reference more ids than have a physical section (a
+        # user-editing artefact, or a [General] that drifted). The next id
+        # must dodge those dangling references too, not just the sections
+        # that actually exist, or it collides with one of them.
+        existing_ids = {int(s) for s in numeric_sections} | {int(s) for s in order if s.isdigit()}
+        next_id = max(existing_ids, default=0) + 1
         our_section = str(next_id)
         order.append(our_section)
 
@@ -128,16 +134,32 @@ def merge_kwin_rule(parser: configparser.ConfigParser) -> str:
 
 def write_kwin_rule(path: Path = KWIN_RULES_PATH) -> tuple[bool, str]:
     """Merge our rule into kwinrulesrc (backing up whatever was there first)
-    and ask the running KWin to reconfigure. Returns (applied, message)."""
+    and ask the running KWin to reconfigure. Returns (applied, message).
+
+    Refuses to write anything if the existing file can't be parsed: treating
+    an unparseable file as an empty one would silently discard everything in
+    it, which is worse than leaving the install half-done and saying so."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        backup = path.with_name(path.name + ".bak")
+
+    # Backed up once, ever, per file: install is meant to be re-run (e.g. to
+    # change the shortcut key), and a second run's "before" is the first
+    # run's "after". Re-backing up on every call would overwrite the one
+    # copy of the user's true pre-install content with our own prior merge.
+    backup = path.with_name(f"{path.name}.bak")
+    if path.exists() and not backup.exists():
         shutil.copy2(path, backup)
 
-    parser = _read_config(path)
+    try:
+        parser = _read_config(path)
+    except configparser.Error as exc:
+        return (
+            False,
+            f"{path} could not be parsed as INI ({exc}); left untouched, nothing was written "
+            f"(a copy of it is at {backup} if you want to inspect it)",
+        )
+
     merge_kwin_rule(parser)
-    with path.open("w", encoding="utf-8") as fh:
-        parser.write(fh, space_around_delimiters=False)
+    _atomic_write(path, parser)
 
     qdbus = shutil.which("qdbus6") or shutil.which("qdbus")
     if qdbus is None:
@@ -159,57 +181,26 @@ def write_kwin_rule(path: Path = KWIN_RULES_PATH) -> tuple[bool, str]:
     return True, f"merged the window rule into {path} and told KWin to reconfigure"
 
 
-def write_desktop_file(launcher: Path, directory: Path = APPLICATIONS_DIR) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    desktop_file = directory / DESKTOP_ID
-    desktop_file.write_text(_DESKTOP_TEMPLATE.format(name=FRIENDLY_NAME, exec_path=launcher))
-    return desktop_file
-
-
-def write_global_shortcut(keys: str) -> tuple[bool, str]:
-    """Register `keys` against our .desktop file in kglobalshortcutsrc via
-    kwriteconfig6. Returns (applied, message); never hot-reloads kglobalaccel,
-    since kglobalaccel6 is not on PATH on this machine."""
-    kwriteconfig = shutil.which("kwriteconfig6") or shutil.which("kwriteconfig5")
-    if kwriteconfig is None:
-        return False, "kwriteconfig6 not found; nothing was written to kglobalshortcutsrc"
-
-    for key, value in (
-        ("_k_friendly_name", FRIENDLY_NAME),
-        ("_launch", f"{keys},none,{FRIENDLY_NAME}"),
-    ):
-        try:
-            subprocess.run(
-                [
-                    kwriteconfig,
-                    "--file",
-                    "kglobalshortcutsrc",
-                    "--group",
-                    DESKTOP_ID,
-                    "--key",
-                    key,
-                    value,
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except (subprocess.CalledProcessError, OSError) as exc:
-            return False, f"kwriteconfig6 failed writing kglobalshortcutsrc ({exc})"
-    return True, f"registered {keys} in kglobalshortcutsrc via kwriteconfig6"
-
-
-def _print_manual_fallback(keys: str) -> None:
+def _print_hotkey_instructions(keys: str) -> None:
     print(
-        "\nkglobalaccel6 is not on PATH here, so this installer cannot hot-reload the "
-        "shortcut, and KDE sometimes only picks up a new one after the next login.\n"
-        f"If {keys} does not toggle the widget, bind it by hand:\n"
+        f"\nThe {keys} hotkey has to be added by hand, once:\n"
         "  System Settings > Keyboard > Shortcuts > Add > Command\n"
-        f"  Command: {_launcher_path()} toggle\n"
-        f"  Shortcut: {keys}"
+        f"  Command:  {_launcher_path()} toggle\n"
+        f"  Shortcut: {keys}\n"
+        "\nThis is a KDE limitation, not an oversight. A shortcut only works once "
+        "its component is registered with kglobalaccel, and that registration "
+        "cannot be produced by writing config files: it is done by KDE itself "
+        "when you bind the key. Writing the config anyway would just leave dead "
+        "entries in your KDE configuration, so this installer does not."
     )
 
 
 def install(keys: str = "Meta+C") -> int:
+    """Install the KWin rule and print the manual hotkey steps.
+
+    Returns 0 when the rule applied. The hotkey is not counted against success:
+    it is inherently manual (see the module docstring), so failing the install
+    over it would report a problem the user cannot fix."""
     launcher = _launcher_path()
     if not launcher.exists():
         print(f"launcher not found at {launcher}")
@@ -218,15 +209,9 @@ def install(keys: str = "Meta+C") -> int:
     kwin_ok, kwin_msg = write_kwin_rule()
     print(f"KWin rule: {'ok' if kwin_ok else 'FAILED'}, {kwin_msg}")
 
-    desktop_file = write_desktop_file(launcher)
-    print(f"wrote {desktop_file}")
+    _print_hotkey_instructions(keys)
 
-    shortcut_ok, shortcut_msg = write_global_shortcut(keys)
-    print(f"Global shortcut: {'ok' if shortcut_ok else 'FAILED'}, {shortcut_msg}")
-
-    _print_manual_fallback(keys)
-
-    if kwin_ok and shortcut_ok:
+    if kwin_ok:
         return 0
-    print("\nInstall did not fully apply. See the FAILED line(s) above.")
+    print("\nThe window rule did not apply. See the FAILED line above.")
     return 1

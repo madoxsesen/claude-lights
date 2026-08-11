@@ -29,10 +29,12 @@ internal detail, not a public contract.
 
 KWin advertises the Wayland layer-shell protocol but does not actually
 composite layer-shell surfaces, so the widget is an ordinary undecorated
-GTK window. All of its placement, keep-above behaviour and taskbar/pager/
-switcher suppression come from a KWin window rule matched on the window's
-`app_id` (`claude-lights`), not from anything the window itself can request
-on Wayland. `claude-lights install` writes that rule; see Usage below.
+GTK window. Its background is fully transparent, so what you see is just the
+coloured dots and their labels floating on the desktop, not a rectangular
+box. All of its placement, keep-above behaviour and taskbar/pager/switcher
+suppression come from a KWin window rule matched on the window's `app_id`
+(`claude-lights`), not from anything the window itself can request on
+Wayland. `claude-lights install` writes that rule; see Usage below.
 
 ## Requirements
 
@@ -64,21 +66,34 @@ bin/claude-lights --fake DIR         # read session files from DIR instead of
                                       # tests/fixtures/README.md for how to
                                       # build one
 bin/claude-lights toggle             # show or hide an already-running widget
-bin/claude-lights install            # install the KWin rule and the Meta+C
-                                      # global shortcut
+bin/claude-lights install            # install the KWin rule, and print the
+                                      # one manual step for the hotkey
 ```
 
-`install` does two independent things and reports on each separately:
+`install` merges a window rule into `~/.config/kwinrulesrc`, backing up
+whatever was there first and preserving any rules you already had, then asks
+the running KWin to reconfigure. That takes effect immediately, with no
+logout. If the existing file cannot be parsed it is left completely untouched
+and the install reports the failure, rather than replacing it.
 
-- Merges a window rule into `~/.config/kwinrulesrc` (backing up whatever was
-  there first) and asks the running KWin to reconfigure. This does not
-  require logging out.
-- Writes a `.desktop` file and registers `Meta+C` against it in
-  `kglobalshortcutsrc` via `kwriteconfig6`, the only writer Plasma will not
-  silently overwrite. It cannot hot-reload the shortcut on this machine
-  (`kglobalaccel6` is not on PATH), so the binding may not be live until the
-  next login. `install` prints a manual fallback (System Settings >
-  Keyboard > Shortcuts > Add > Command) for that case.
+## Binding the hotkey
+
+This is a one-time manual step, and it cannot be automated:
+
+- System Settings > Keyboard > Shortcuts > Add > Command
+- Command: the full path to `bin/claude-lights toggle`
+- Shortcut: `Meta+C`, or whatever you prefer
+
+A KDE shortcut only fires once its component is registered with
+`kglobalaccel`, and that registration is performed by KDE itself when you
+bind the key. It cannot be produced by writing configuration files. Verified
+directly: writing a `[services][<id>.desktop]` entry plus a matching
+`.desktop`, then running `kbuildsycoca6 --noincremental` and restarting
+`plasma-kglobalaccel`, never registers a component; calling
+`org.kde.KGlobalAccel.setShortcut` over D-Bus is accepted, returns an empty
+list, and registers nothing. So `install` prints these instructions rather
+than writing configuration that would sit in your KDE settings doing
+nothing.
 
 ## Start at login
 
@@ -107,6 +122,8 @@ PyGObject bindings installed by `python3-gi-cairo`; they are not on PyPI.
   focus-stealing and visible in the taskbar.
 - `set_keep_above` and the rule's `above=true` are advisory, not absolute: a
   genuinely fullscreen window still covers the widget.
+- The hotkey has to be bound by hand once, for the reason above. Everything
+  else `install` does is automatic.
 - The session registry format is internal to Claude Code and may change
   without notice. Reads are defensive against that, so a change should
   degrade the widget to fewer or grey dots rather than crash it, but this
