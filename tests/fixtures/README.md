@@ -1,79 +1,56 @@
 # Fixtures
 
-Fixture session files for eyeballing `claude_lights/widget.py`.
+There are no fixture files here any more. There used to be pid-bound JSON
+files (`four/`, `unverified/`), but every one of them pinned a specific
+live pid to pass `registry.py`'s liveness check, and every one of them went
+stale the moment that pid's process exited -- which happened repeatedly,
+including to the long-lived helper process kept alive specifically to stop
+it happening. A fixture that only stays valid while a stray background
+process keeps running is not a fixture worth committing.
 
-**These fixtures pin a specific pid, and that pid WILL be dead by the time
-you read this.** Every file reuses the pid of a live process so the
-liveness check in `claude_lights/registry.py` passes without spawning real
-Claude Code sessions -- but that means the moment the process that minted
-them exits, `registry.scan()` sees zero live sessions and every fixture
-here scans to nothing. There is no way to commit a fixture that stays live
-forever. **Always regenerate before using these** -- don't assume a fresh
-checkout works as-is.
+## For eyeballing the widget: `widget.DemoRegistry`
 
-Regenerate both sets against a fresh long-lived pid with:
+`claude_lights.widget.DemoRegistry` returns four hand-built `Session`
+objects directly -- no files, no pids, nothing that can go stale:
+
+```python
+from gi.repository import Gtk
+from claude_lights import widget
+
+widget.LightsWindow(widget.DemoRegistry())
+Gtk.main()
+```
+
+One session per colour (idle/green, busy/yellow, waiting/red-blinking) plus
+an unverified one (`verified=False`, so it renders the `Light.UNKNOWN` grey
+override regardless of its `busy` status). Task 6 wires this up behind a
+`--demo` flag.
+
+## For exercising the real file-scanning path: point `--fake` at your own directory
+
+If you specifically need to test `registry.scan()` / `Registry.poll()`
+against real files (as opposed to the widget's drawing, which `DemoRegistry`
+already covers), build a throwaway directory yourself. Every session file
+needs a `pid` that is genuinely alive when you read it, because
+`registry.py` checks `/proc/<pid>/stat` and rejects anything else:
 
 ```bash
-cd ~/git/claude-lights
-sleep 999999 &      # anything long-lived works; this is just the simplest
-HELPER_PID=$!
-disown
+.venv/bin/python - <<'PY'
+import json, os, pathlib
 
-.venv/bin/python - <<PY
-import json, pathlib
+pid = os.getpid()  # only live for as long as this python process is
+raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+start = raw[raw.rfind(")") + 2:].split()[19]
 
-PID = $HELPER_PID
-
-def stat_start(pid: int) -> str:
-    raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
-    return raw[raw.rfind(")") + 2 :].split()[19]
-
-start = stat_start(PID)
-
-four = pathlib.Path("tests/fixtures/four")
-for old in four.glob("*.json"):
-    old.unlink()
-for i, (name, status) in enumerate([
-    ("atira-d0", "idle"), ("atira-d4", "busy"),
-    ("frontend-7e", "shell"), ("infra-9a", "waiting"),
-]):
-    (four / f"{PID}{i}.json").write_text(json.dumps({
-        "pid": PID, "cwd": "/home/msesen/git/atira",
-        "startedAt": 1000 + i, "procStart": start,
-        "name": name, "status": status, "tmux": None,
-    }))
-
-unverified = pathlib.Path("tests/fixtures/unverified")
-for old in unverified.glob("*.json"):
-    old.unlink()
-(unverified / f"{PID}0.json").write_text(json.dumps({
-    "pid": PID, "cwd": "/home/msesen/git/atira",
-    "startedAt": 3000, "procStart": start,
-    "name": "verified-idle", "status": "idle", "tmux": None,
+d = pathlib.Path("/tmp/claude-lights-manual-fixture")
+d.mkdir(parents=True, exist_ok=True)
+(d / f"{pid}0.json").write_text(json.dumps({
+    "pid": pid, "cwd": "/home/msesen/git/atira", "startedAt": 1000,
+    "procStart": start, "name": "atira-d0", "status": "idle", "tmux": None,
 }))
-(unverified / f"{PID}1.json").write_text(json.dumps({
-    "pid": PID, "cwd": "/home/msesen/git/atira",
-    "startedAt": 3001,
-    "name": "unverified-busy", "status": "busy", "tmux": None,
-}))
-print("regenerated four/ and unverified/ against pid", PID)
+print("wrote", d)
 PY
 ```
 
-Keep the `sleep 999999` (or whatever you used) running for as long as you
-need the fixtures live; killing it makes them scan to zero again.
-
-Because every fixture in a set shares one pid, drive these with the stateless
-`registry.scan()` rather than `Registry.poll()` -- `poll()` keys by pid and
-would collapse same-pid fixtures into a single dot.
-
-- `four/` - one session per colour: idle (green), busy (yellow), shell
-  (yellow), waiting (red, blinking). Names `atira-d0`, `atira-d4`,
-  `frontend-7e`, `infra-9a` with ascending `startedAt` so the 2x2 layout order
-  is deterministic. This is the canonical demo fixture.
-- `unverified/` - two sessions: `verified-idle` has a correct `procStart` and
-  renders green as `idle` normally would. `unverified-busy` has no
-  `procStart` key at all, so `registry.scan()` cannot apply the PID-reuse
-  guard and marks it `verified=False`; it must render grey (`Light.UNKNOWN`)
-  rather than the yellow that its `busy` status would otherwise map to. This
-  proves the grey override in `widget._light_for_session()`.
+Whatever pid you use, the fixture is only live for as long as that process
+is. Don't commit the result -- regenerate it fresh whenever you need it.

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import signal
 from pathlib import Path
+from typing import NamedTuple
 
 import cairo
 import gi
@@ -41,15 +43,31 @@ def _light_for_session(session: Session) -> Light:
 POLL_MS = 2000
 BLINK_MS = 600
 
-CELL_W = 64
-CELL_H = 58
 DOT_RADIUS = 13
 LABEL_SIZE = 9.0
 PAD = 6
+GAP_X = 10
+GAP_Y = 10
+LABEL_GAP = 4
+MAX_LABEL_W = 72
 
-_BG = (0.09, 0.09, 0.11, 0.82)
 _LABEL = (0.85, 0.85, 0.88)
+_OUTLINE = (0.0, 0.0, 0.0, 0.85)
 _BLINK_DIM = 0.28
+
+
+class _Layout(NamedTuple):
+    """One cell size for the whole grid, derived from what will actually be
+    drawn. _resize() and _draw() both call _measure() to get this, rather
+    than each computing their own numbers, so they cannot disagree about
+    where a dot ends up versus how big the window is."""
+
+    cols: int
+    rows: int
+    cell_w: float
+    cell_h: float
+    ascent: float
+    entries: list[tuple[str, float]]  # (fitted label, label width) per session
 
 
 class LightsWindow(Gtk.Window):
@@ -70,6 +88,12 @@ class LightsWindow(Gtk.Window):
         self._logged_blink_error = False
         self._logged_toggle_error = False
         self._logged_draw_error = False
+        self._logged_map_error = False
+
+        # A throwaway 1x1 surface purely for text measurement, so _resize()
+        # can size the window before there is any real draw context to
+        # measure with. Same font calls as _draw() uses, so the numbers match.
+        self._measure_ctx = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
 
         self.set_app_paintable(True)
         visual = self.get_screen().get_rgba_visual()
@@ -91,6 +115,10 @@ class LightsWindow(Gtk.Window):
         # Never steal focus from the terminal underneath.
         self.set_accept_focus(False)
         self.set_focus_on_map(False)
+        # Click-through: an empty input-shape region means the compositor
+        # never routes pointer input to this window at all, so a click lands
+        # on whatever is underneath instead of just uselessly focusing us.
+        self.connect("map-event", self._on_map)
 
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self._on_toggle)
         GLib.timeout_add(poll_ms, self._on_poll)
@@ -111,6 +139,23 @@ class LightsWindow(Gtk.Window):
         else:
             self._logged_toggle_error = False
         return GLib.SOURCE_CONTINUE
+
+    def _on_map(self, _widget, _event) -> bool:
+        # Re-applied on every map, not just once: the toggle hides and shows
+        # this same window repeatedly, and Wayland can recreate the surface
+        # on remap rather than reuse it, which would silently drop the
+        # input-shape region set at construction time.
+        try:
+            gdk_window = self.get_window()
+            if gdk_window is not None:
+                gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
+        except Exception:
+            if not self._logged_map_error:
+                log.exception("failed to make the window click-through")
+                self._logged_map_error = True
+        else:
+            self._logged_map_error = False
+        return False
 
     def _on_poll(self) -> bool:
         # A timer callback must never raise, or the timer stops and the widget
@@ -152,11 +197,39 @@ class LightsWindow(Gtk.Window):
             self._logged_blink_error = False
         return GLib.SOURCE_CONTINUE
 
-    def _resize(self) -> None:
+    def _measure(self) -> _Layout:
         cols, rows = layout(len(self._sessions))
         if cols == 0:
+            return _Layout(0, 0, 0.0, 0.0, 0.0, [])
+
+        ctx = self._measure_ctx
+        ctx.select_font_face("Sans")
+        ctx.set_font_size(LABEL_SIZE)
+
+        entries: list[tuple[str, float]] = []
+        cell_w = float(2 * DOT_RADIUS)
+        for session in self._sessions:
+            label = self._fit(ctx, session.name, MAX_LABEL_W)
+            width = ctx.text_extents(label).width
+            entries.append((label, width))
+            cell_w = max(cell_w, width)
+
+        ascent, _descent, line_height, _max_x_adv, _max_y_adv = ctx.font_extents()
+        cell_h = 2 * DOT_RADIUS + LABEL_GAP + line_height
+        return _Layout(cols, rows, cell_w, cell_h, ascent, entries)
+
+    def _resize(self) -> None:
+        # set_size_request() on the child, not self.resize() on the window:
+        # an explicit resize() pins a size that survives future shrinks even
+        # after the child's natural size drops, which is why the window
+        # used to never shrink back down once it had shown four sessions.
+        grid = self._measure()
+        if grid.cols == 0:
+            self._area.set_size_request(-1, -1)
             return
-        self.resize(cols * CELL_W + PAD * 2, rows * CELL_H + PAD * 2)
+        width = 2 * PAD + grid.cols * grid.cell_w + (grid.cols - 1) * GAP_X
+        height = 2 * PAD + grid.rows * grid.cell_h + (grid.rows - 1) * GAP_Y
+        self._area.set_size_request(math.ceil(width), math.ceil(height))
 
     def _apply_visibility(self) -> None:
         if self._toggled_on and self._sessions:
@@ -183,12 +256,19 @@ class LightsWindow(Gtk.Window):
             return result
 
     def _draw(self, ctx) -> bool:
-        cols, _rows = layout(len(self._sessions))
-        if cols == 0:
+        # Uses the exact same _measure() as _resize(): if the two ever
+        # computed cell sizes independently, a dot could land outside the
+        # backdrop the moment the two calculations drifted apart.
+        grid = self._measure()
+        if grid.cols == 0:
             return False
 
+        # No backdrop: the surface is fully transparent, so only the dots and
+        # labels are painted. Dots stay plain solid fills; the label gets a
+        # cheap dark outline so it is not actively invisible on a light
+        # background, without trying to guarantee contrast in every case.
         ctx.set_operator(cairo.Operator.SOURCE)
-        ctx.set_source_rgba(*_BG)
+        ctx.set_source_rgba(0, 0, 0, 0)
         ctx.paint()
         ctx.set_operator(cairo.Operator.OVER)
 
@@ -196,9 +276,10 @@ class LightsWindow(Gtk.Window):
         ctx.set_font_size(LABEL_SIZE)
 
         for index, session in enumerate(self._sessions):
-            col, row = index % cols, index // cols
-            cx = PAD + col * CELL_W + CELL_W / 2
-            cy = PAD + row * CELL_H + DOT_RADIUS + 2
+            col, row = index % grid.cols, index // grid.cols
+            label, label_w = grid.entries[index]
+            cx = PAD + col * (grid.cell_w + GAP_X) + grid.cell_w / 2
+            cy = PAD + row * (grid.cell_h + GAP_Y) + DOT_RADIUS
 
             light = _light_for_session(session)
             alpha = _BLINK_DIM if (blinks(light) and not self._blink_on) else 1.0
@@ -206,23 +287,40 @@ class LightsWindow(Gtk.Window):
             ctx.arc(cx, cy, DOT_RADIUS, 0, 6.283185307179586)
             ctx.fill()
 
-            label = self._fit(ctx, session.name)
-            width = ctx.text_extents(label).width
+            label_x = cx - label_w / 2
+            label_y = cy + DOT_RADIUS + LABEL_GAP + grid.ascent
+            ctx.move_to(label_x, label_y)
+            ctx.text_path(label)
+            ctx.set_source_rgba(*_OUTLINE)
+            ctx.set_line_width(2.5)
+            ctx.stroke_preserve()
             ctx.set_source_rgb(*_LABEL)
-            ctx.move_to(cx - width / 2, cy + DOT_RADIUS + 14)
-            ctx.show_text(label)
+            ctx.fill()
 
         return False
 
     @staticmethod
-    def _fit(ctx, name: str) -> str:
-        budget = CELL_W - 4
+    def _fit(ctx, name: str, budget: float) -> str:
         if ctx.text_extents(name).width <= budget:
             return name
         trimmed = name
         while trimmed and ctx.text_extents(trimmed + "…").width > budget:
             trimmed = trimmed[:-1]
         return trimmed + "…" if trimmed else ""
+
+
+class DemoRegistry:
+    """Synthetic sessions for visual checks. Bypasses the registry entirely, so
+    it cannot go stale the way pid-bound fixture files do -- there is no pid
+    and no file for a process exit to invalidate."""
+
+    def poll(self) -> list[Session]:
+        return [
+            Session(pid=1, name="atira-d0", cwd="", status="idle", started_at=0, tmux=None, verified=True),
+            Session(pid=2, name="atira-d4", cwd="", status="busy", started_at=1, tmux=None, verified=True),
+            Session(pid=3, name="infra-9a", cwd="", status="waiting", started_at=2, tmux=None, verified=True),
+            Session(pid=4, name="ghost-7e", cwd="", status="busy", started_at=3, tmux=None, verified=False),
+        ]
 
 
 def run(session_dir: Path | None = None) -> int:
