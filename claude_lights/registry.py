@@ -26,6 +26,7 @@ class Session:
     status: str
     started_at: int
     tmux: str | None
+    verified: bool
 
 
 @dataclass
@@ -34,25 +35,31 @@ class ScanResult:
     unreadable_pids: list[int] = field(default_factory=list)
 
 
-def _proc_start_ticks(pid: int) -> str | None:
-    try:
-        raw = Path(f"/proc/{pid}/stat").read_text()
-    except (OSError, ValueError):
-        return None
+def _parse_starttime(stat_content: str) -> str | None:
     # comm is parenthesised and may contain spaces, so index from the last ')'.
-    fields = raw[raw.rfind(")") + 2 :].split()
+    fields = stat_content[stat_content.rfind(")") + 2 :].split()
     if len(fields) <= _STARTTIME_OFFSET:
         return None
     return fields[_STARTTIME_OFFSET]
 
 
-def _is_live(pid: int, proc_start: object) -> bool:
+def _proc_start_ticks(pid: int) -> str | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, ValueError):
+        return None
+    return _parse_starttime(raw)
+
+
+def _liveness(pid: int, proc_start: object) -> tuple[bool, bool]:
+    """Return (live, verified). verified is False when the file carried no
+    procStart, so the PID-reuse guard could not be applied."""
     actual = _proc_start_ticks(pid)
     if actual is None:
-        return False
+        return (False, False)
     if proc_start is None:
-        return True
-    return str(proc_start) == actual
+        return (True, False)
+    return (str(proc_start) == actual, True)
 
 
 def _pid_from_name(path: Path) -> int | None:
@@ -84,20 +91,29 @@ def scan(session_dir: Path = DEFAULT_SESSION_DIR) -> ScanResult:
         status = raw.get("status")
         if not isinstance(pid, int) or not isinstance(status, str):
             continue
-        if not _is_live(pid, raw.get("procStart")):
+        live, verified = _liveness(pid, raw.get("procStart"))
+        if not live:
             continue
 
-        cwd = raw.get("cwd") or ""
-        name = raw.get("name") or Path(cwd).name or str(pid)
+        raw_cwd = raw.get("cwd")
+        cwd = raw_cwd if isinstance(raw_cwd, str) else ""
+
+        raw_name = raw.get("name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else (Path(cwd).name or str(pid))
+
+        raw_tmux = raw.get("tmux")
+        tmux = raw_tmux if isinstance(raw_tmux, str) else None
+
         started_at = raw.get("startedAt")
         result.sessions.append(
             Session(
                 pid=pid,
-                name=str(name),
-                cwd=str(cwd),
+                name=name,
+                cwd=cwd,
                 status=status,
                 started_at=started_at if isinstance(started_at, int) else 0,
-                tmux=raw.get("tmux"),
+                tmux=tmux,
+                verified=verified,
             )
         )
 

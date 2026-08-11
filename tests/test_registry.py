@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_lights import registry
 from claude_lights.registry import Registry, Session, scan
 
 
@@ -55,6 +56,23 @@ def test_recycled_pid_is_dropped(tmp_path):
     # Same pid, wrong start time: a different process now owns this pid.
     write_session(tmp_path, os.getpid(), procStart="1")
     assert scan(tmp_path).sessions == []
+
+
+def test_matching_proc_start_is_verified(tmp_path):
+    write_session(tmp_path, os.getpid())
+    assert scan(tmp_path).sessions[0].verified is True
+
+
+def test_missing_proc_start_is_live_but_unverified(tmp_path):
+    # A future Claude Code release could drop the field. It must still show
+    # up (grey, per the widget), not vanish as if no session were open.
+    path = write_session(tmp_path, os.getpid())
+    payload = json.loads(path.read_text())
+    del payload["procStart"]
+    path.write_text(json.dumps(payload))
+    result = scan(tmp_path)
+    assert len(result.sessions) == 1
+    assert result.sessions[0].verified is False
 
 
 def test_half_written_file_is_reported_as_unreadable(tmp_path):
@@ -109,6 +127,21 @@ def test_name_falls_back_to_cwd_basename(tmp_path):
     assert scan(tmp_path).sessions[0].name == "atira"
 
 
+def test_non_string_cwd_does_not_raise(tmp_path):
+    # A truthy non-string cwd (e.g. a stray int) used to reach Path(cwd) and
+    # raise TypeError straight out of scan().
+    pid = os.getpid()
+    write_session(tmp_path, pid, name=None, cwd=42)
+    result = scan(tmp_path)
+    assert result.sessions[0].cwd == ""
+    assert result.sessions[0].name == str(pid)
+
+
+def test_non_string_tmux_becomes_none(tmp_path):
+    write_session(tmp_path, os.getpid(), tmux=7)
+    assert scan(tmp_path).sessions[0].tmux is None
+
+
 def test_registry_keeps_last_good_value_through_a_half_write(tmp_path):
     pid = os.getpid()
     path = write_session(tmp_path, pid, status="busy")
@@ -129,3 +162,13 @@ def test_registry_drops_a_session_whose_file_disappears(tmp_path):
     assert len(reg.poll()) == 1
     path.unlink()
     assert reg.poll() == []
+
+
+def test_starttime_parser_reads_field_22_of_a_synthetic_stat_line():
+    # A hand-built line, not read from /proc: comm is parenthesised and
+    # contains its own spaces and inner parens, which would defeat a naive
+    # split or a first-')' search. Field 22 (starttime) is given a sentinel
+    # value that is unambiguous if the parser lands on the wrong field.
+    filler_fields = [str(n) for n in range(1, 19)]  # fields 4..21
+    line = "1234 (my (weird) proc) S " + " ".join(filler_fields) + " 424242 extra1 extra2"
+    assert registry._parse_starttime(line) == "424242"
