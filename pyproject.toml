@@ -1,0 +1,9 @@
+[project]
+name = "claude-lights"
+version = "0.1.0"
+description = "Traffic-light widget for running Claude Code sessions"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
