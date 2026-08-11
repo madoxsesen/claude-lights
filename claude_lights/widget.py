@@ -323,7 +323,7 @@ class DemoRegistry:
         ]
 
 
-def run(session_dir: Path | None = None) -> int:
+def run(session_dir: Path | None = None, demo: bool = False) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         gi.require_foreign("cairo")
@@ -334,6 +334,7 @@ def run(session_dir: Path | None = None) -> int:
         )
         return 1
     ipc.write_pidfile()
-    LightsWindow(Registry(session_dir or DEFAULT_SESSION_DIR))
+    registry = DemoRegistry() if demo else Registry(session_dir or DEFAULT_SESSION_DIR)
+    LightsWindow(registry)
     Gtk.main()
     return 0
