@@ -2,10 +2,66 @@
 
 Fixture session files for eyeballing `claude_lights/widget.py`.
 
-Every file reuses the pid of a live process so the liveness check in
-`claude_lights/registry.py` passes without spawning real Claude Code sessions.
-Regenerate them with the snippet in Task 5 of the implementation plan if the
-pid goes stale (i.e. the process that owned it has exited).
+**These fixtures pin a specific pid, and that pid WILL be dead by the time
+you read this.** Every file reuses the pid of a live process so the
+liveness check in `claude_lights/registry.py` passes without spawning real
+Claude Code sessions -- but that means the moment the process that minted
+them exits, `registry.scan()` sees zero live sessions and every fixture
+here scans to nothing. There is no way to commit a fixture that stays live
+forever. **Always regenerate before using these** -- don't assume a fresh
+checkout works as-is.
+
+Regenerate both sets against a fresh long-lived pid with:
+
+```bash
+cd ~/git/claude-lights
+sleep 999999 &      # anything long-lived works; this is just the simplest
+HELPER_PID=$!
+disown
+
+.venv/bin/python - <<PY
+import json, pathlib
+
+PID = $HELPER_PID
+
+def stat_start(pid: int) -> str:
+    raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    return raw[raw.rfind(")") + 2 :].split()[19]
+
+start = stat_start(PID)
+
+four = pathlib.Path("tests/fixtures/four")
+for old in four.glob("*.json"):
+    old.unlink()
+for i, (name, status) in enumerate([
+    ("atira-d0", "idle"), ("atira-d4", "busy"),
+    ("frontend-7e", "shell"), ("infra-9a", "waiting"),
+]):
+    (four / f"{PID}{i}.json").write_text(json.dumps({
+        "pid": PID, "cwd": "/home/msesen/git/atira",
+        "startedAt": 1000 + i, "procStart": start,
+        "name": name, "status": status, "tmux": None,
+    }))
+
+unverified = pathlib.Path("tests/fixtures/unverified")
+for old in unverified.glob("*.json"):
+    old.unlink()
+(unverified / f"{PID}0.json").write_text(json.dumps({
+    "pid": PID, "cwd": "/home/msesen/git/atira",
+    "startedAt": 3000, "procStart": start,
+    "name": "verified-idle", "status": "idle", "tmux": None,
+}))
+(unverified / f"{PID}1.json").write_text(json.dumps({
+    "pid": PID, "cwd": "/home/msesen/git/atira",
+    "startedAt": 3001,
+    "name": "unverified-busy", "status": "busy", "tmux": None,
+}))
+print("regenerated four/ and unverified/ against pid", PID)
+PY
+```
+
+Keep the `sleep 999999` (or whatever you used) running for as long as you
+need the fixtures live; killing it makes them scan to zero again.
 
 Because every fixture in a set shares one pid, drive these with the stateless
 `registry.scan()` rather than `Registry.poll()` -- `poll()` keys by pid and

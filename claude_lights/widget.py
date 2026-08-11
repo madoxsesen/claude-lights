@@ -1,4 +1,4 @@
-"""The GTK3 layer-shell window. Every GTK call in the project lives here."""
+"""The widget window. Every GTK call in the project lives here."""
 
 from __future__ import annotations
 
@@ -10,9 +10,19 @@ import cairo
 import gi
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("GtkLayerShell", "0.1")
 
-from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
+
+# The Wayland app_id the KWin rule matches on. Must be set before any window is
+# realized, which is why LightsWindow.__init__ calls _ensure_app_id() first.
+_APP_ID = "claude-lights"
+
+
+def _ensure_app_id() -> None:
+    if GLib.get_prgname() != _APP_ID:
+        GLib.set_prgname(_APP_ID)
+        GLib.set_application_name(_APP_ID)
+
 
 from claude_lights import ipc  # noqa: E402
 from claude_lights.grid import layout  # noqa: E402
@@ -30,7 +40,6 @@ def _light_for_session(session: Session) -> Light:
 
 POLL_MS = 2000
 BLINK_MS = 600
-MARGIN = 8
 
 CELL_W = 64
 CELL_H = 58
@@ -50,6 +59,7 @@ class LightsWindow(Gtk.Window):
         poll_ms: int = POLL_MS,
         blink_ms: int = BLINK_MS,
     ) -> None:
+        _ensure_app_id()
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self._registry = registry
         self._sessions: list[Session] = []
@@ -70,15 +80,17 @@ class LightsWindow(Gtk.Window):
         self._area.connect("draw", self._on_draw)
         self.add(self._area)
 
-        GtkLayerShell.init_for_window(self)
-        GtkLayerShell.set_namespace(self, "claude-lights")
-        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, MARGIN)
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, MARGIN)
-        # Never steal keyboard focus from the terminal underneath.
-        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        # KWin accepts layer-shell surfaces but never composites them, so this
+        # is an ordinary window. Placement, keep-above and taskbar suppression
+        # come from the KWin rule that matches _APP_ID.
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_keep_above(True)  # honoured under X11; on Wayland the rule enforces it
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        # Never steal focus from the terminal underneath.
+        self.set_accept_focus(False)
+        self.set_focus_on_map(False)
 
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self._on_toggle)
         GLib.timeout_add(poll_ms, self._on_poll)
@@ -215,10 +227,12 @@ class LightsWindow(Gtk.Window):
 
 def run(session_dir: Path | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    if not GtkLayerShell.is_supported():
+    try:
+        gi.require_foreign("cairo")
+    except Exception:
         log.error(
-            "compositor does not support zwlr_layer_shell_v1. "
-            "Install gir1.2-gtklayershell-0.1 and run under a Wayland session."
+            "missing the cairo foreign-struct bridge, so nothing can be painted. "
+            "Install it with: sudo apt install python3-gi-cairo"
         )
         return 1
     ipc.write_pidfile()
