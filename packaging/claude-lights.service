@@ -1,0 +1,13 @@
+[Unit]
+Description=Claude Lights
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/git/claude-lights/bin/claude-lights
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
